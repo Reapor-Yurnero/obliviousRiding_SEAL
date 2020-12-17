@@ -16,4 +16,4 @@ Running this program will give you a report of the execution where you can see t
 
 4. `./main`
 
-5. You may also tweak the parameters chosen in Step 1 in `main`function to see what's happening.
+5. You may also tweak the parameters chosen in Step 1 in `main` function to see what's happening.
