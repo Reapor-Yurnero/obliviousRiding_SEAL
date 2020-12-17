@@ -19,6 +19,25 @@
 using namespace std;
 using namespace seal;
 
+/*
+Helper function: Get poly_modulus_degree from a SEALContext.
+*/
+inline size_t get_N_from_context(const seal::SEALContext &context) {
+    auto &context_data = *context.key_context_data();
+    return context_data.parms().poly_modulus_degree();
+}
+
+/*
+Helper function: Get plaintext modulus from a SEALContext.
+*/
+inline uint64_t get_T_from_context(const seal::SEALContext &context) {
+    auto &context_data = *context.key_context_data();
+    return context_data.parms().plain_modulus().value();
+}
+
+/*
+Helper function: Prints the parameters in a SEALContext.
+*/
 inline void print_parameters(const seal::SEALContext &context)
 {
     auto &context_data = *context.key_context_data();
@@ -196,123 +215,235 @@ inline uint64_t distance(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
 
 
 int main() {
-    // Set the parameter.
-    EncryptionParameters parms(scheme_type::bfv);
-    // size_t poly_modulus_degree = 8192;
-    size_t poly_modulus_degree = 4096;
-    parms.set_poly_modulus_degree(poly_modulus_degree);
-    parms.set_coeff_modulus(CoeffModulus::BFVDefault(poly_modulus_degree));
-    // uint64_t plain_modulus = 65929217;
-    uint64_t plain_modulus = 1032193;
-    parms.set_plain_modulus(plain_modulus);
-    SEALContext context(parms);
-
-    // Rider's keygen.
-    KeyGenerator keygen(context);
-    SecretKey secret_key = keygen.secret_key();
-    PublicKey public_key;
-    keygen.create_public_key(public_key);
-    RelinKeys relin_keys;
-    keygen.create_relin_keys(relin_keys);
-
-    // Construction of utility objects.
-    Encryptor encryptor_pk(context, public_key);
-    Encryptor encryptor_sk(context, secret_key);
-    Evaluator evaluator(context);
-    Decryptor decryptor(context, secret_key);
-    BatchEncoder batch_encoder(context);
-
-    size_t slot_count = batch_encoder.slot_count();
-    cout << "slot_count: "<< slot_count<<endl;
-    uint64_t max_value = sqrt(plain_modulus/2); // ensure the distance won't overflow
+    stringstream parms_stream; // Stream used to share parameters among server and clients.
+    stringstream data_stream; // Stream used to share data (pk, rlk, ctxt) among server and clients.
+    stringstream sk_stream; // Stream simulating the local secret storage of the rider.
+    vector<vector<uint64_t> > driver_vectors; // Not used by anyone. For verification of correctness of the application.
+    size_t driver_num; // Number of drivers in this region set by the server.
 
     /*
-    Generate and encrypt the rider's position data.
-    (x, y) in a grid of [0, max_value-1] x [0, max_value-1]
+    Step 1: Server sets and sends the parameters.
     */
-    const uint64_t rider_x = random_uint64() % max_value;
-    const uint64_t rider_y = random_uint64() % max_value;
+    {
+        // Set the parameters.
+        EncryptionParameters parms(scheme_type::bfv);
+        size_t poly_modulus_degree = 8192;
+        // size_t poly_modulus_degree = 4096;
+        parms.set_poly_modulus_degree(poly_modulus_degree);
+        parms.set_coeff_modulus(CoeffModulus::BFVDefault(poly_modulus_degree));
+        uint64_t plain_modulus = 65929217;
+        // uint64_t plain_modulus = 1032193;
+        parms.set_plain_modulus(plain_modulus);
 
-    vector<uint64_t> rider_vector; // rider vector
-    for (size_t i = 0; i < slot_count; i++) {
-        rider_vector.push_back(i % 2 == 0 ? rider_x : rider_y);
+        // driver_num = 3;
+        driver_num = poly_modulus_degree/2;
+
+        auto size = parms.save(parms_stream);
+        print_line(__LINE__);
+        cout << "EncryptionParameters: wrote " << size << " bytes" << endl;
     }
-    
-    Plaintext rider_plaintext; // encoded plaintext
-    batch_encoder.encode(rider_vector, rider_plaintext);
-    print_matrix(rider_vector, slot_count/2);
-
-    Ciphertext rider_ciphertext;
-    // encryptor_sk.encrypt_symmetric(rider_plaintext, rider_ciphertext);
-    encryptor_pk.encrypt(rider_plaintext, rider_ciphertext);
-    cout << "    + Noise budget in encrypted_matrix: " << decryptor.invariant_noise_budget(rider_ciphertext) << " bits" << endl;
 
     /*
-    Generate and encrypt the drivers' position data. 
+    Step 2: The rider follows the parameters and generated a pair of pk and sk, 
+    and then she uses either pk or sk to encrypt her coordinates to send to the server.
     */
-    size_t driver_num = slot_count/2;
-    // size_t driver_num = 3;
-    vector<vector<uint64_t> > driver_vectors;
-    vector<Plaintext> driver_plaintexts; // vector of encoded plaintext of drivers
-    vector<Ciphertext> driver_ciphertexts;
-    for (size_t i = 0; i < driver_num; ++i) {
-        vector<uint64_t> temp_vector(slot_count, 0ULL);
-        temp_vector[i<<1] = random_uint64() % max_value;
-        temp_vector[(i<<1)+1] = random_uint64() % max_value;
-        driver_vectors.push_back(temp_vector);
-        if (i < 3) print_matrix(temp_vector, slot_count/2);
+    {
+        // Load the parms from the parms_stream and reset the read pointer.
+        EncryptionParameters parms;
+        parms.load(parms_stream);
+        parms_stream.seekg(0, parms_stream.beg);
+        SEALContext context(parms);
+
+        // Rider generetes key and stores them to stream properly.
+        KeyGenerator keygen(context);
+        SecretKey secret_key = keygen.secret_key();
+        Serializable<PublicKey> public_key = keygen.create_public_key();
+        Serializable<RelinKeys> relin_keys = keygen.create_relin_keys();
+        secret_key.save(sk_stream);
+        public_key.save(data_stream);
+        relin_keys.save(data_stream);
+
+        // Construction of utility objects.
+        // Encryptor encryptor_pk(context, public_key);
+        Encryptor encryptor_sk(context, secret_key);
+        Evaluator evaluator(context);
+        Decryptor decryptor(context, secret_key);
+        BatchEncoder batch_encoder(context);
+        size_t slot_count = batch_encoder.slot_count();
+        uint64_t plain_modulus = get_T_from_context(context);
+        uint64_t max_value = sqrt(plain_modulus/2); // ensure the distance won't overflow
+
+        /*
+        Generate and encrypt the rider's position data.
+        (x, y) in a grid of [0, max_value-1] x [0, max_value-1]
+        */
+        const uint64_t rider_x = random_uint64() % max_value;
+        const uint64_t rider_y = random_uint64() % max_value;
+        sk_stream << rider_x << " " << rider_y;
+
+        vector<uint64_t> rider_vector; // rider vector
+        for (size_t i = 0; i < slot_count; i++) {
+            rider_vector.push_back(i % 2 == 0 ? rider_x : rider_y);
+        }
         
-        Plaintext temp_plaintext;
-        batch_encoder.encode(temp_vector, temp_plaintext);
-        driver_plaintexts.push_back(temp_plaintext);
+        Plaintext rider_plaintext; // encoded plaintext
+        batch_encoder.encode(rider_vector, rider_plaintext);
+        print_matrix(rider_vector, slot_count/2);
 
-        Ciphertext temp_ciphertext;
-        encryptor_pk.encrypt(temp_plaintext, temp_ciphertext);
-        driver_ciphertexts.push_back(temp_ciphertext);
+        Serializable<Ciphertext> rider_ciphertext = encryptor_sk.encrypt_symmetric(rider_plaintext);
+        rider_ciphertext.save(data_stream);
     }
 
-    evaluator.negate_inplace(rider_ciphertext);
-    for (size_t i = 0; i < driver_num; ++i) {
-        evaluator.add_inplace(rider_ciphertext, driver_ciphertexts[i]);
+    /*
+    Step 3: Server broadcasts the rider's pk.
+    
+    Note - This step is empty here because data_stream is shared with drivers as well.
+    In reality, server should load pk, rlk and ciphertext of rider from data_stream,
+    store locally, and broadcast only pk to the drivers.
+    */
+    {
+    }
+
+    /*
+    Step 4: Drivers encrypt their own coordinates with the rider's pk and send
+    to the server.
+    */
+    {
+        // Load the parms from the parms_stream and reset the read pointer.
+        EncryptionParameters parms;
+        parms.load(parms_stream);
+        parms_stream.seekg(0, parms_stream.beg);
+        SEALContext context(parms);
+
+        // Load rider's pk from data_stream.
+        PublicKey public_key;
+        public_key.load(context, data_stream);
+
+        // Construction of utility objects.
+        Encryptor encryptor_pk(context, public_key);
+        BatchEncoder batch_encoder(context);
+        size_t slot_count = batch_encoder.slot_count();
+        uint64_t plain_modulus = get_T_from_context(context);
+        uint64_t max_value = sqrt(plain_modulus/2); // ensure the distance won't overflow
+
+        /*
+        Generate and encrypt the drivers' position data. 
+        */
+        for (size_t i = 0; i < driver_num; ++i) {
+            vector<uint64_t> driver_vector(slot_count, 0ULL);
+            driver_vector[i<<1] = random_uint64() % max_value;
+            driver_vector[(i<<1)+1] = random_uint64() % max_value;
+            driver_vectors.push_back(driver_vector);
+            if (i < 3) print_matrix(driver_vector, slot_count/2);
+            
+            Plaintext driver_plaintext;
+            batch_encoder.encode(driver_vector, driver_plaintext);
+
+            Serializable<Ciphertext> driver_ciphertext = encryptor_pk.encrypt(driver_plaintext);
+            driver_ciphertext.save(data_stream);
+        }
+    }
+
+    /*
+    Step 5: The server evaluates the squared distance between the rider and each of the drivers
+    homomorphically with relinearization after each operation and then send back to the rider;
+    */
+    {
+        // Load the parms from the parms_stream and reset the read pointer.
+        EncryptionParameters parms;
+        parms.load(parms_stream);
+        parms_stream.seekg(0, parms_stream.beg);
+        SEALContext context(parms);
+
+        // Load rider's rlk from data_stream.
+        RelinKeys relin_keys;
+        relin_keys.load(context, data_stream);
+
+        // Construction of utility objects.
+        Evaluator evaluator(context);
+
+        // Load rider's ciphertext.
+        Ciphertext rider_ciphertext;
+        rider_ciphertext.load(context, data_stream);
+
+        // Evaluate addition while loading drivers' ciphertexts.
+        evaluator.negate_inplace(rider_ciphertext);
+        for (size_t i = 0; i < driver_num; ++i) {
+            Ciphertext driver_ciphertext;
+            driver_ciphertext.load(context, data_stream);
+            evaluator.add_inplace(rider_ciphertext, driver_ciphertext);
+            evaluator.relinearize_inplace(rider_ciphertext, relin_keys);
+        }
+        evaluator.square_inplace(rider_ciphertext);
         evaluator.relinearize_inplace(rider_ciphertext, relin_keys);
+        rider_ciphertext.save(data_stream);
     }
-    evaluator.square_inplace(rider_ciphertext);
-    evaluator.relinearize_inplace(rider_ciphertext, relin_keys);
-    
-    cout << "    + Noise budget in result: " << decryptor.invariant_noise_budget(rider_ciphertext) << " bits" << endl << endl;
 
-    Plaintext result_plaintext;
-    vector<uint64_t> result_vector;
-    print_line(__LINE__);
-    cout << "Decrypt and decode result." << endl;
-    decryptor.decrypt(rider_ciphertext, result_plaintext);
-    batch_encoder.decode(result_plaintext, result_vector);
-    cout << "    + Result plaintext matrix ...... Correct." << endl;
-    print_matrix(result_vector, slot_count/2);
+    /*
+    Step 6: The rider decrypts the evaluation result with her sk, and identifies
+    the closest driver.
+    */
+    {   
+        // Load the parms from the parms_stream and reset the read pointer.
+        EncryptionParameters parms;
+        parms.load(parms_stream);
+        // parms_stream.seekg(0, parms_stream.beg);
+        SEALContext context(parms);
 
-    uint64_t min_id = 0, min_x = max_value, min_y = max_value, min_dist = plain_modulus;
-    size_t error_count = 0;
+        // Load its own sk and coordinates from sk_stream.
+        SecretKey secret_key;
+        secret_key.load(context, sk_stream);
+        uint64_t rider_x, rider_y;
+        sk_stream >> rider_x >> rider_y;
 
-    for (size_t i = 0; i < driver_num; ++i) {
-        uint64_t driver_x = driver_vectors[i][i<<1], driver_y = driver_vectors[i][1+(i<<1)];
+        // Construction of utility objects.
+        Evaluator evaluator(context);
+        Decryptor decryptor(context, secret_key);
+        BatchEncoder batch_encoder(context);
+        size_t slot_count = batch_encoder.slot_count();
+        uint64_t plain_modulus = get_T_from_context(context);
+        uint64_t max_value = sqrt(plain_modulus/2); // ensure the distance won't overflow
 
-        uint64_t computed_dist = result_vector[i<<1] + result_vector[1+(i<<1)];
-        uint64_t actual_dist = distance(driver_x, driver_y, rider_x, rider_y);
-        
-        if (computed_dist == actual_dist) {
-            if (computed_dist < min_dist) {
-                min_id = i, min_x = driver_x, min_y = driver_y, min_dist = computed_dist;
+        // Load evaluated result ciphertext from data_stream.
+        Ciphertext rider_ciphertext;
+        rider_ciphertext.load(context, data_stream);
+        cout << "    + Noise budget in result: " << decryptor.invariant_noise_budget(rider_ciphertext) << " bits" << endl << endl;
+
+        // Decrypt and decode the result.
+        Plaintext result_plaintext;
+        vector<uint64_t> result_vector;
+        print_line(__LINE__);
+        cout << "Decrypt and decode result." << endl;
+        decryptor.decrypt(rider_ciphertext, result_plaintext);
+        batch_encoder.decode(result_plaintext, result_vector);
+        cout << "    + Result plaintext matrix:" << endl;
+        print_matrix(result_vector, slot_count/2);
+
+        // Find the closest driver and count the total errors found.
+        uint64_t min_id = 0, min_x = max_value, min_y = max_value, min_dist = plain_modulus;
+        size_t error_count = 0;
+
+        for (size_t i = 0; i < driver_num; ++i) {
+            uint64_t driver_x = driver_vectors[i][i<<1], driver_y = driver_vectors[i][1+(i<<1)];
+
+            uint64_t computed_dist = result_vector[i<<1] + result_vector[1+(i<<1)];
+            uint64_t actual_dist = distance(driver_x, driver_y, rider_x, rider_y);
+            
+            if (computed_dist == actual_dist) {
+                if (computed_dist < min_dist) {
+                    min_id = i, min_x = driver_x, min_y = driver_y, min_dist = computed_dist;
+                }
+            }
+            else {
+                error_count++;
+                cout << computed_dist << " " << actual_dist << endl;
             }
         }
-        else {
-            error_count++;
-            cout << computed_dist << " " << actual_dist << endl;
-        }
-    }
 
-    cout << "Client computes the closest driver position." << endl;
-    cout << "Closest driver: driver #" << min_id << " at (" << min_x << ", " << min_y <<") with distance " << min_dist << "." << endl;
-    cout << error_count << " errors in decrypting." << endl;
+        cout << "Rider computes the closest driver position." << endl;
+        cout << "Closest driver: driver #" << min_id << " at (" << min_x << ", " << min_y <<") with distance " << min_dist << "." << endl;
+        cout << error_count << " errors found." << endl;
+    }
 
     return 0;
 }
