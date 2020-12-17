@@ -19,6 +19,23 @@
 using namespace std;
 using namespace seal;
 
+
+/*
+Helper function: Prints the name of the example in a fancy banner.
+*/
+inline void print_example_banner(std::string title)
+{
+    if (!title.empty())
+    {
+        std::size_t title_length = title.length();
+        std::size_t banner_length = title_length + 2 * 10;
+        std::string banner_top = "+" + std::string(banner_length - 2, '-') + "+";
+        std::string banner_middle = "|" + std::string(9, ' ') + title + std::string(9, ' ') + "|";
+
+        std::cout << std::endl << banner_top << std::endl << banner_middle << std::endl << banner_top << std::endl;
+    }
+}
+
 /*
 Helper function: Get poly_modulus_degree from a SEALContext.
 */
@@ -215,6 +232,8 @@ inline uint64_t distance(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
 
 
 int main() {
+    print_example_banner("Oblivious Rider Application");
+
     stringstream parms_stream; // Stream used to share parameters among server and clients.
     stringstream data_stream; // Stream used to share data (pk, rlk, ctxt) among server and clients.
     stringstream sk_stream; // Stream simulating the local secret storage of the rider.
@@ -239,8 +258,6 @@ int main() {
         driver_num = poly_modulus_degree/2;
 
         auto size = parms.save(parms_stream);
-        print_line(__LINE__);
-        cout << "EncryptionParameters: wrote " << size << " bytes" << endl;
     }
 
     /*
@@ -253,6 +270,7 @@ int main() {
         parms.load(parms_stream);
         parms_stream.seekg(0, parms_stream.beg);
         SEALContext context(parms);
+        print_parameters(context);
 
         // Rider generetes key and stores them to stream properly.
         KeyGenerator keygen(context);
@@ -264,8 +282,7 @@ int main() {
         relin_keys.save(data_stream);
 
         // Construction of utility objects.
-        // Encryptor encryptor_pk(context, public_key);
-        Encryptor encryptor_sk(context, secret_key);
+        Encryptor encryptor_sk(context, secret_key); // Encryptor encryptor_pk(context, public_key);
         Evaluator evaluator(context);
         Decryptor decryptor(context, secret_key);
         BatchEncoder batch_encoder(context);
@@ -288,6 +305,8 @@ int main() {
         
         Plaintext rider_plaintext; // encoded plaintext
         batch_encoder.encode(rider_vector, rider_plaintext);
+        print_line(__LINE__);
+        cout << "Rider's plaintext in vector format [rider_x, rider_y,rider_x, rider_y, ..., rider_x, rider_y]:" << endl;
         print_matrix(rider_vector, slot_count/2);
 
         Serializable<Ciphertext> rider_ciphertext = encryptor_sk.encrypt_symmetric(rider_plaintext);
@@ -334,8 +353,11 @@ int main() {
             driver_vector[i<<1] = random_uint64() % max_value;
             driver_vector[(i<<1)+1] = random_uint64() % max_value;
             driver_vectors.push_back(driver_vector);
-            if (i < 3) print_matrix(driver_vector, slot_count/2);
-            
+            if (i < 3 || i > driver_num-4) {
+                print_line(__LINE__);
+                cout << i << "-th driver's plaintext in vector format: [0, 0, ..., driver[i]_x, driver[i]_y, ..., 0, 0]:" << endl;
+                print_matrix(driver_vector, slot_count/2);
+            }
             Plaintext driver_plaintext;
             batch_encoder.encode(driver_vector, driver_plaintext);
 
@@ -406,14 +428,14 @@ int main() {
 
         // Load evaluated result ciphertext from data_stream.
         Ciphertext rider_ciphertext;
+        print_line(__LINE__);
+        cout << "Decrypt and decode result." << endl << endl;
         rider_ciphertext.load(context, data_stream);
-        cout << "    + Noise budget in result: " << decryptor.invariant_noise_budget(rider_ciphertext) << " bits" << endl << endl;
+        cout << "    + Noise budget in result ciphertext: " << decryptor.invariant_noise_budget(rider_ciphertext) << " bits" << endl << endl;
 
         // Decrypt and decode the result.
         Plaintext result_plaintext;
         vector<uint64_t> result_vector;
-        print_line(__LINE__);
-        cout << "Decrypt and decode result." << endl;
         decryptor.decrypt(rider_ciphertext, result_plaintext);
         batch_encoder.decode(result_plaintext, result_vector);
         cout << "    + Result plaintext matrix:" << endl;
@@ -439,8 +461,8 @@ int main() {
                 cout << computed_dist << " " << actual_dist << endl;
             }
         }
-
-        cout << "Rider computes the closest driver position." << endl;
+        print_example_banner("Summary");
+        cout << "Rider finds the closest driver's position." << endl;
         cout << "Closest driver: driver #" << min_id << " at (" << min_x << ", " << min_y <<") with distance " << min_dist << "." << endl;
         cout << error_count << " errors found." << endl;
     }
